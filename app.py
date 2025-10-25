@@ -1,143 +1,204 @@
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request, g
 from random import choice
+from pathlib import Path
+import sqlite3
 
+BASE_DIR = Path(__file__).parent
+path_to_db = BASE_DIR / "new_store.db"  # <- тут путь к БД
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 
 
-about_me = {
-   "name": "Алексей",
-   "surname": "Требунский",
-   "email": "a.trebounskiy@gmail.com"
-}
+KEYS = ('author', 'text', 'rating')
 
-quotes = [
-   {
-       "id": 3,
-       "author": "Rick Cook",
-       "text": "Программирование сегодня — это гонка разработчиков программ, стремящихся писать программы с большей и лучшей идиотоустойчивостью, и вселенной, которая пытается создать больше отборных идиотов. Пока вселенная побеждает."
-   },
-   {
-       "id": 5,
-       "author": "Waldi Ravens",
-       "text": "Программирование на С похоже на быстрые танцы на только что отполированном полу людей с острыми бритвами в руках."
-   },
-   {
-       "id": 6,
-       "author": "Mosher's Law of Software Engineering",
-       "text": "Не волнуйтесь, если что-то не работает. Если бы всё работало, вас бы уволили."
-   },
-   {
-       "id": 8,
-       "author": "Yoggi Berra",
-       "text": "В теории, теория и практика неразделимы. На практике это не так."
-   },
-
-]
+def make_dicts(cursor, row):
+    """ Create dicts from db results."""
+    return dict((cursor.description[idx][0], value)
+                for idx, value in enumerate(row))
 
 
-@app.route("/") # Это первый URL, который мы будет обрабатывать
-def hello_world(): 
-    """ Это функция-обработчик, которая будет 
-        вызвана приложением для обработки URL'a. """
-    return jsonify(hello="Hello, Students!"), 200
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(path_to_db)
+    db.row_factory = make_dicts
+    return db
 
 
-@app.route("/about")
-def about():
-   return jsonify(about_me), 200
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
 
+
+def init_db():
+    with app.app_context():
+        db = get_db()
+        with app.open_resource('./db_sql/db_data.sql', mode='r') as f:
+            db.cursor().executescript(f.read())
+        db.commit()
+
+
+def query_db(query, args=(), one=False):
+    cur = get_db().execute(query, args)
+    rv = cur.fetchall()
+    cur.close()
+    return (rv[0] if rv else None) if one else rv
+
+
+def check(data: dict, check_rating=False) -> tuple[bool, dict]:
+    keys = ('author', 'text', 'rating')
+    if check_rating:
+        rating = data.get('rating')    
+        if rating and rating not in range(1, 6):
+            return False, {"error": "Rating must be between 1 and 5"}
+    
+    if set(data.keys()) - set(keys):
+        return False, {"error": "Invalid fields to create/update"}
+    return True, data
+         
 
 @app.get("/quotes")
 def get_quotes():
-    """ Функция преобразует список словарей в массив объектов JSON. """
-    return jsonify(quotes)
+    """ Функция возвращает все цитаты из БД. """
+    select_quotes = "SELECT * from quotes"
+    quotes = query_db(select_quotes) # now get list[dict]
+    return jsonify(quotes), 200
 
-
-@app.get("/params/<value>")
-def get_params(value: str):
-    """ Пример динамического URL'a."""
-    # print(vars(request))
-    print(f'{request.path}')
-    print(f'{request.url}')
-    # print(f'{request.json}')  # Словарь с данными из тела запроса
-    print(f'{request.args}')  # Словарь с данными(query parameters)
-    return jsonify(param=value, value_type=str(type(value))), 200
-
-
-# /quotes/1
-# /quotes/2
-# /quotes/3
-# ...
-# /quotes/n-1
-# /quotes/n
 
 @app.get("/quotes/<int:quote_id>")
 def get_quote_by_id(quote_id: int):
-    """ Return quote by id from 'quotes' list."""
-    for quote in quotes:
-        if quote["id"] == quote_id:
-            return jsonify(quote), 200
+    """ Return quote by id from db."""
+    quote_select = "SELECT * FROM quotes WHERE id=?"
+    quote = query_db(quote_select, (quote_id,), one=True)
+    if quote:
+        return jsonify(quote), 200
     return jsonify(error=f"Quote with id={quote_id} not found"), 404
+
+@app.route("/quotes/random", methods=['GET'])
+def get_random_quote():
+    """Возврат случайной цитаты."""
+    quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты
+    if not quotes:
+        return jsonify(error="No quotes found"), 404
+    quote = choice(quotes)  # Выбираем случайную цитату
+    return jsonify(quote), 200
+
 
 @app.get("/quotes/count")
 def get_quotes_count() -> int:
-    """ Return count of quotes """
-    return {"count": len(quotes)}
+    """ Return count of quotes in db."""
+    quantity_select = """SELECT COUNT(*) as count FROM quotes"""
+    cursor = get_db().cursor()
+    count = cursor.execute(quantity_select).fetchone()
+    return jsonify(count), 200
 
 
-@app.get("/quotes/random")
-def get_random_quotes():
-    """ Return random quote."""
-    return jsonify(choice(quotes))
-
-
-def generate_new_id():
-    """New id для цитаты"""
-    if not quotes:
-        return 1
-    return quotes[-1]["id"] + 1
-
-
-@app.route("/quotes", methods=['POST'])
+@app.post("/quotes")
 def create_quote():
-    """ Function creates new quote and adds it to the list of quotes"""
-    new_quote = request.json
-    new_id = generate_new_id()
-    new_quote["id"]= new_id
-    new_quote["rating"] = new_quote.get("rating", 1)
-    if new_quote["rating"] < 1 or new_quote["rating"] > 5:
-        new_quote["rating"] = 1  # Если некорректный рейтинг(например 10), то оставляем без изменений или устанавливаем значение по умолчанию.
-    quotes.append(new_quote)
-    return jsonify(new_quote), 201
+    """ Function creates new quote and adds it to db."""
+    if (result := check(request.json))[0]:
+        new_quote = result[1]
+        new_quote["rating"] = 1
+        insert_quote = "INSERT INTO quotes (author, text, rating) VALUES (?, ?, ?)"
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(insert_quote, tuple(new_quote.values()))
+        try:
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            abort(503, f"error: {str(e)}")
+        else:
+            new_quote['id'] = cursor.lastrowid
+            return jsonify(new_quote), 201
+    
+    return jsonify(result[1]), 400
+    
 
 
-@app.route("/quotes/<int:quote_id>", methods=['PUT'])
-def edit_quote(quote_id):
+@app.put("/quotes/<int:quote_id>")
+def edit_quote(quote_id: int):
+    """Update an existing quote"""
     new_data = request.json
-    keys = ('author', 'text', 'rating')
-    if not set(new_data.keys()) - set(keys):
-        for quote in quotes:
-            if quote["id"] == quote_id:
-                if "rating" in new_data and new_data['rating'] not in range(1, 6):  # Проверяем корректность рейтинга
-                    new_data.pop('rating')                   
-                quote.update(new_data)
-                return jsonify(quote), 200
-    else:
-        return jsonify(error="Send bad data to update"), 400
-    return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
+    result = check(new_data, check_rating=True)
+    if not result[0]:
+        return jsonify(result[1]), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Создаем кортеж значений для подстановки и список строк из полей для обновления
+    update_values = list(new_data.values())
+    update_fieds = [f'{key} = ?' for key in new_data]
+
+    if not update_fieds:
+        return jsonify(error="No valid update fields provided."), 400
+    
+
+    update_values.append(quote_id)
+    update_query = f""" UPDATE quotes SET {', '.join(update_fieds)} WHERE id = ? """
+    cursor.execute(update_query, update_values)
+
+    if cursor.rowcount == 0:
+        return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
+    
+    response, status_code = get_quote_by_id(quote_id)
+    if status_code == 200:
+        return response, 200
+    abort(404, {"error": f"Quote with id={quote_id} not found"})
 
 
 @app.route("/quotes/<int:quote_id>", methods=['DELETE'])
 def delete_quote(quote_id):
-    """Удаление цитат"""
-    for i, quote in enumerate(quotes):
-        if quote["id"] == quote_id:
-            del quotes[i]
-            return jsonify({"message": f"Quote with id {quote_id} is deleted."}), 200
-    return jsonify({"error": "Quote not found"}), 404
+    """Delete quote by id """
+    delete_quote = "DELETE FROM quotes WHERE id=?"
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(delete_quote, (quote_id, ))
+    if cursor.rowcount == 0:
+        return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
+    return jsonify({"message": f"Quote with id {quote_id} has deleted."}), 200
+    
+
+@app.route("/quotes/filter", methods=['GET'])
+def filter_quotes():
+    """Поиск по фильтру"""
+    author = request.args.get('author')
+    rating = request.args.get('rating')
+    filtered_quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты из БД
+
+    if author:
+        filtered_quotes = [quote for quote in filtered_quotes if quote['author'] == author]
+    if rating:
+        filtered_quotes = [quote for quote in filtered_quotes if quote['rating'] == int(rating)]  # Проверка также на int
+
+    return jsonify(filtered_quotes), 200
+
+
+@app.route("/quotes/filter_v2", methods=['GET'])
+def filter_quotes_v2():
+    """Поиск по фильтру"""
+    filtered_quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты из БД
+
+    for key, value in request.args.items():
+        if key not in KEYS:
+            return jsonify(error=f"Invalid param={key}"), 400
+        
+        if key == 'rating':
+            try:
+                value = int(value)  # Преобразуем в целое
+            except ValueError:
+                return jsonify(error="Rating must be an integer"), 400
+            
+        filtered_quotes = [quote for quote in filtered_quotes if quote[key] == value]
+
+    return jsonify(filtered_quotes), 200
 
 
 if __name__ == "__main__":
+    if not path_to_db.exists():
+        init_db()
     app.run(debug=True)
