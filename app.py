@@ -4,13 +4,11 @@ from pathlib import Path
 import sqlite3
 
 BASE_DIR = Path(__file__).parent
-path_to_db = BASE_DIR / "new_store.db"  # <- тут путь к БД
+path_to_db = BASE_DIR / "store.db"  # <- тут путь к БД
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 
-
-KEYS = ('author', 'text', 'rating')
 
 def make_dicts(cursor, row):
     """ Create dicts from db results."""
@@ -77,15 +75,6 @@ def get_quote_by_id(quote_id: int):
         return jsonify(quote), 200
     return jsonify(error=f"Quote with id={quote_id} not found"), 404
 
-@app.route("/quotes/random", methods=['GET'])
-def get_random_quote():
-    """Возврат случайной цитаты."""
-    quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты
-    if not quotes:
-        return jsonify(error="No quotes found"), 404
-    quote = choice(quotes)  # Выбираем случайную цитату
-    return jsonify(quote), 200
-
 
 @app.get("/quotes/count")
 def get_quotes_count() -> int:
@@ -105,7 +94,7 @@ def create_quote():
         insert_quote = "INSERT INTO quotes (author, text, rating) VALUES (?, ?, ?)"
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute(insert_quote, tuple(new_quote.values()))
+        cursor.execute(sql=insert_quote, parameters=tuple(new_quote.values()))
         try:
             conn.commit()
         except Exception as e:
@@ -141,7 +130,12 @@ def edit_quote(quote_id: int):
     update_values.append(quote_id)
     update_query = f""" UPDATE quotes SET {', '.join(update_fieds)} WHERE id = ? """
     cursor.execute(update_query, update_values)
-
+    try:
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        abort(503, f"error: {str(e)}")
+        
     if cursor.rowcount == 0:
         return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
     
@@ -158,44 +152,52 @@ def delete_quote(quote_id):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(delete_quote, (quote_id, ))
+    try:
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        abort(503, f"error: {str(e)}")
+
     if cursor.rowcount == 0:
         return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
     return jsonify({"message": f"Quote with id {quote_id} has deleted."}), 200
     
 
-@app.route("/quotes/filter", methods=['GET'])
-def filter_quotes():
-    """Поиск по фильтру"""
-    author = request.args.get('author')
-    rating = request.args.get('rating')
-    filtered_quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты из БД
+# Homework
+# TODO: change filter endpoint to work with db
 
-    if author:
-        filtered_quotes = [quote for quote in filtered_quotes if quote['author'] == author]
-    if rating:
-        filtered_quotes = [quote for quote in filtered_quotes if quote['rating'] == int(rating)]  # Проверка также на int
+# @app.route("/quotes/filter", methods=['GET'])
+# def filter_quotes():
+#     """Поиск по фильтру"""
+#     author = request.args.get('author')
+#     rating = request.args.get('rating')
+#     filtered_quotes = quotes[:]
 
-    return jsonify(filtered_quotes), 200
+#     if author:
+#         filtered_quotes = [quote for quote in filtered_quotes if quote['author'] == author]
+#     if rating:
+#         filtered_quotes = [quote for quote in filtered_quotes if str(quote['rating']) == rating]
+
+#     return jsonify(filtered_quotes), 200
 
 
-@app.route("/quotes/filter_v2", methods=['GET'])
-def filter_quotes_v2():
-    """Поиск по фильтру"""
-    filtered_quotes = query_db("SELECT * FROM quotes")  # Получаем все цитаты из БД
+# @app.route("/quotes/filter_v2", methods=['GET'])
+# def filter_quotes_v2():
+#     """Поиск по фильтру"""
+#     filtered_quotes = quotes.copy()
+#     # Цикл по query parameters
+#     for key, value in request.args.items():
+#         result = []
+#         if key not in KEYS:
+#             return jsonify(error=f"Invalid param={value}"), 400
+#         if key == 'rating':
+#             value = int(value)
+#         for quote in filtered_quotes:
+#             if quote[key] == value:
+#                 result.append(quote)     
+#         filtered_quotes = result.copy()
 
-    for key, value in request.args.items():
-        if key not in KEYS:
-            return jsonify(error=f"Invalid param={key}"), 400
-        
-        if key == 'rating':
-            try:
-                value = int(value)  # Преобразуем в целое
-            except ValueError:
-                return jsonify(error="Rating must be an integer"), 400
-            
-        filtered_quotes = [quote for quote in filtered_quotes if quote[key] == value]
-
-    return jsonify(filtered_quotes), 200
+#     return jsonify(filtered_quotes), 200
 
 
 if __name__ == "__main__":
