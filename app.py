@@ -1,53 +1,71 @@
 from flask import Flask, abort, jsonify, request, g
-from random import choice
 from pathlib import Path
-import sqlite3
+from werkzeug.exceptions import HTTPException
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import String, func, ForeignKey
+from sqlalchemy.exc import SQLAlchemyError, InvalidRequestError
+from flask_migrate import Migrate
+
+
+
+class Base(DeclarativeBase):
+    pass
+
 
 BASE_DIR = Path(__file__).parent
-path_to_db = BASE_DIR / "store.db"  # <- тут путь к БД
+path_to_db = BASE_DIR / "quotes.db"  # <- тут путь к БД
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 
+app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{path_to_db}"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ECHO'] = False
 
-def make_dicts(cursor, row):
-    """ Create dicts from db results."""
-    return dict((cursor.description[idx][0], value)
-                for idx, value in enumerate(row))
-
-
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(path_to_db)
-    db.row_factory = make_dicts
-    return db
+db = SQLAlchemy(model_class=Base)
+db.init_app(app)
+migrate = Migrate(app, db)
 
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+class AuthorModel(db.Model):
+    __tablename__ = 'authors'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[int] = mapped_column(String(32), index=True, unique=True)
+    quotes: Mapped[list['QuoteModel']] = relationship(back_populates='author', lazy='dynamic')
+
+    def __init__(self, name):
+        self.name = name
 
 
-def init_db():
-    with app.app_context():
-        db = get_db()
-        with app.open_resource('./db_sql/db_data.sql', mode='r') as f:
-            db.cursor().executescript(f.read())
-        db.commit()
+class QuoteModel(db.Model):
+    __tablename__ = 'quotes'
 
+    id: Mapped[int] = mapped_column(primary_key=True)
+    author_id: Mapped[str] = mapped_column(ForeignKey('authors.id'))
+    author: Mapped['AuthorModel'] = relationship(back_populates='quotes')
+    text: Mapped[str] = mapped_column(String(255))
 
-def query_db(query, args=(), one=False):
-    cur = get_db().execute(query, args)
-    rv = cur.fetchall()
-    cur.close()
-    return (rv[0] if rv else None) if one else rv
+    def __init__(self, author, text):
+        self.author = author
+        self.text  = text
 
+    def __repr__(self):
+        return f'Quote{self.id, self.author}'  
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "author": self.author,
+            "text": self.text
+        }
+    
 
 def check(data: dict, check_rating=False) -> tuple[bool, dict]:
-    keys = ('author', 'text', 'rating')
+    keys = ('author', 'text')
     if check_rating:
         rating = data.get('rating')    
         if rating and rating not in range(1, 6):
@@ -58,149 +76,99 @@ def check(data: dict, check_rating=False) -> tuple[bool, dict]:
     return True, data
          
 
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    """ Функция для перехвата HTTP ошибок и возврата в виде JSON."""
+    return jsonify({"error": str(e)}), e.code
+
+
 @app.get("/quotes")
 def get_quotes():
     """ Функция возвращает все цитаты из БД. """
-    select_quotes = "SELECT * from quotes"
-    quotes = query_db(select_quotes) # now get list[dict]
+    quotes_db = db.session.scalars(db.select(QuoteModel)).all()
+    # Формируем список словарей
+    quotes = []
+    for quote in quotes_db:
+        quotes.append(quote.to_dict())
     return jsonify(quotes), 200
 
 
 @app.get("/quotes/<int:quote_id>")
 def get_quote_by_id(quote_id: int):
     """ Return quote by id from db."""
-    quote_select = "SELECT * FROM quotes WHERE id=?"
-    quote = query_db(quote_select, (quote_id,), one=True)
-    if quote:
-        return jsonify(quote), 200
-    return jsonify(error=f"Quote with id={quote_id} not found"), 404
+    quote = db.get_or_404(entity=QuoteModel, ident=quote_id, description=f"Quote with id={quote_id} not found")
+    return jsonify(quote.to_dict()), 200
+
 
 
 @app.get("/quotes/count")
 def get_quotes_count() -> int:
     """ Return count of quotes in db."""
-    quantity_select = """SELECT COUNT(*) as count FROM quotes"""
-    cursor = get_db().cursor()
-    count = cursor.execute(quantity_select).fetchone()
-    return jsonify(count), 200
+    count = db.session.scalar(func.count(QuoteModel.id))
+    return jsonify(count=count), 200
 
 
 @app.post("/quotes")
 def create_quote():
     """ Function creates new quote and adds it to db."""
-    if (result := check(request.json))[0]:
-        new_quote = result[1]
-        new_quote["rating"] = 1
-        insert_quote = "INSERT INTO quotes (author, text, rating) VALUES (?, ?, ?)"
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(sql=insert_quote, parameters=tuple(new_quote.values()))
-        try:
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            abort(503, f"error: {str(e)}")
-        else:
-            new_quote['id'] = cursor.lastrowid
-            return jsonify(new_quote), 201
+    data = request.json
+    try:
+        quote = QuoteModel(**data)
+        db.session.add(quote)
+        db.session.commit()
+    except TypeError:
+        abort(400, f'Invalid data. Required: <author> and <text>. Received: {', '.join(data.keys())}')
+    except Exception as e:
+        abort(503, f"Database error: {str(e)}")
     
-    return jsonify(result[1]), 400
+    return jsonify(quote.to_dict()), 201
     
 
 
 @app.put("/quotes/<int:quote_id>")
 def edit_quote(quote_id: int):
-    """Update an existing quote"""
+    """ Update an existing quote """
     new_data = request.json
     result = check(new_data, check_rating=True)
     if not result[0]:
-        return jsonify(result[1]), 400
+        return abort(400, result[1].get('error'))
     
-    conn = get_db()
-    cursor = conn.cursor()
+    quote = db.get_or_404(entity=QuoteModel, ident=quote_id, description=f"Quote with id={quote_id} not found")
 
-    # Создаем кортеж значений для подстановки и список строк из полей для обновления
-    update_values = list(new_data.values())
-    update_fieds = [f'{key} = ?' for key in new_data]
-
-    if not update_fieds:
-        return jsonify(error="No valid update fields provided."), 400
-    
-
-    update_values.append(quote_id)
-    update_query = f""" UPDATE quotes SET {', '.join(update_fieds)} WHERE id = ? """
-    cursor.execute(update_query, update_values)
     try:
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        abort(503, f"error: {str(e)}")
-        
-    if cursor.rowcount == 0:
-        return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
-    
-    response, status_code = get_quote_by_id(quote_id)
-    if status_code == 200:
-        return response, 200
-    abort(404, {"error": f"Quote with id={quote_id} not found"})
+        for key_as_attr, value in new_data.items():
+            setattr(quote, key_as_attr, value)
+
+        db.session.commit()
+        return jsonify(quote.to_dict()), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        abort(503, f"Database error: {str(e)}")
 
 
 @app.route("/quotes/<int:quote_id>", methods=['DELETE'])
 def delete_quote(quote_id):
     """Delete quote by id """
-    delete_quote = "DELETE FROM quotes WHERE id=?"
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(delete_quote, (quote_id, ))
+    quote = db.get_or_404(entity=QuoteModel, ident=quote_id, description=f"Quote with id={quote_id} not found")
+    db.session.delete(quote)
     try:
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        abort(503, f"error: {str(e)}")
-
-    if cursor.rowcount == 0:
-        return jsonify({"error": f"Quote with id={quote_id} not found"}), 404
-    return jsonify({"message": f"Quote with id {quote_id} has deleted."}), 200
+        db.session.commit()
+        return jsonify({"message": f"Quote with id {quote_id} has deleted."}), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        abort(503, f"Database error: {str(e)}")
     
-
-# Homework
-# TODO: change filter endpoint to work with db
-
-# @app.route("/quotes/filter", methods=['GET'])
-# def filter_quotes():
-#     """Поиск по фильтру"""
-#     author = request.args.get('author')
-#     rating = request.args.get('rating')
-#     filtered_quotes = quotes[:]
-
-#     if author:
-#         filtered_quotes = [quote for quote in filtered_quotes if quote['author'] == author]
-#     if rating:
-#         filtered_quotes = [quote for quote in filtered_quotes if str(quote['rating']) == rating]
-
-#     return jsonify(filtered_quotes), 200
-
-
-# @app.route("/quotes/filter_v2", methods=['GET'])
-# def filter_quotes_v2():
-#     """Поиск по фильтру"""
-#     filtered_quotes = quotes.copy()
-#     # Цикл по query parameters
-#     for key, value in request.args.items():
-#         result = []
-#         if key not in KEYS:
-#             return jsonify(error=f"Invalid param={value}"), 400
-#         if key == 'rating':
-#             value = int(value)
-#         for quote in filtered_quotes:
-#             if quote[key] == value:
-#                 result.append(quote)     
-#         filtered_quotes = result.copy()
-
-#     return jsonify(filtered_quotes), 200
+    
+@app.route("/quotes/filter", methods=['GET'])
+def filter_quotes():
+    data = request.args # get query parameters from URL
+    try:
+        quotes = db.session.scalars(db.select(QuoteModel).filter_by(**data)).all()
+    except InvalidRequestError:
+        abort(400, f'Invalid data. Required: <author> and <text>. Received: {', '.join(data.keys())}')
+    
+    return jsonify([quote.to_dict() for quote in quotes]), 200
 
 
 if __name__ == "__main__":
-    if not path_to_db.exists():
-        init_db()
     app.run(debug=True)
