@@ -34,12 +34,15 @@ class AuthorModel(db.Model):
     __tablename__ = 'authors'
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[int] = mapped_column(String(32), index=True, unique=True)
+    name: Mapped[str] = mapped_column(String(32), index=True, unique=True)
     quotes: Mapped[list['QuoteModel']] = relationship(back_populates='author', lazy='dynamic')
 
     def __init__(self, name):
         self.name = name
 
+    def to_dict(self):
+        return {"id": self.id, "name": self.name}
+    
 
 class QuoteModel(db.Model):
     __tablename__ = 'quotes'
@@ -48,19 +51,21 @@ class QuoteModel(db.Model):
     author_id: Mapped[str] = mapped_column(ForeignKey('authors.id'))
     author: Mapped['AuthorModel'] = relationship(back_populates='quotes')
     text: Mapped[str] = mapped_column(String(255))
+    rating: Mapped[int] = mapped_column(server_default="1")
 
-    def __init__(self, author, text):
+    def __init__(self, author, text, rating=1):
         self.author = author
         self.text  = text
+        self.rating = rating
 
     def __repr__(self):
         return f'Quote{self.id, self.author}'  
     
     def to_dict(self):
         return {
-            "id": self.id,
-            "author": self.author,
-            "text": self.text
+            "quote_id": self.id,
+            "text": self.text,
+            "rating": self.rating
         }
     
 
@@ -82,6 +87,55 @@ def handle_exception(e):
     return jsonify({"error": str(e)}), e.code
 
 
+def add_to_db(cls, data):
+    """ Function to work with db layer """
+    try:
+        new_instance = cls(**data)
+        db.session.add(new_instance)
+        db.session.commit()
+    except TypeError:
+        abort(400, f'Invalid data. Required: <name>. Received: {', '.join(data.keys())}')
+    except Exception as e:
+        abort(503, f"Database error: {str(e)}")
+    return jsonify(new_instance.to_dict()), 201
+
+
+# ====== Authors endpoints =======
+@app.post("/authors")
+def create_author():
+    author_data = request.json
+    # add_to_db(AuthorModel, author_data)  # Variant 2
+    try:
+        author = AuthorModel(**author_data)
+        db.session.add(author)
+        db.session.commit()
+    except TypeError:
+        abort(400, f'Invalid data. Required: <name>. Received: {', '.join(author_data.keys())}')
+    except Exception as e:
+        abort(503, f"Database error: {str(e)}")
+    return jsonify(author.to_dict()), 201
+
+
+# URL: "/authors/<int:author_id>/quotes"
+@app.route("/authors/<int:author_id>/quotes", methods=["GET", "POST"])
+def author_quotes(author_id: int):
+    author = db.get_or_404(AuthorModel, author_id, description=f"Author with id={author_id} not found")
+
+    if request.method == "GET":
+        quotes = [quote.to_dict() for quote in author.quotes]
+        return jsonify({"author": author.name} | {"quotes": quotes}), 200
+
+    elif request.method == "POST":
+        data = request.json
+        new_quote = QuoteModel(author, **data)
+        db.session.add(new_quote)
+        db.session.commit()
+        return jsonify(new_quote.to_dict() | { "author_id" : author.id}), 201
+    else:
+        abort(405)
+
+
+# ====== Quotes endpoints =======
 @app.get("/quotes")
 def get_quotes():
     """ Функция возвращает все цитаты из БД. """

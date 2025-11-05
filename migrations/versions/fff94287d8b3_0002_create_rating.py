@@ -1,8 +1,8 @@
-"""0001 Initial migration
+"""0002 create rating
 
-Revision ID: d21cf5f56b77
+Revision ID: fff94287d8b3
 Revises: 
-Create Date: 2025-11-04 19:14:06.792580
+Create Date: 2025-11-05 14:40:24.228706
 
 """
 from alembic import op
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = 'd21cf5f56b77'
+revision = 'fff94287d8b3'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -30,6 +30,7 @@ def upgrade():
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('author_id', sa.Integer(), nullable=False),
     sa.Column('text', sa.String(length=255), nullable=False),
+    sa.Column('rating', sa.Integer(), server_default='1', nullable=False),
     sa.ForeignKeyConstraint(['author_id'], ['authors.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
